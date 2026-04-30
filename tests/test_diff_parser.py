@@ -1,5 +1,4 @@
-import pytest
-from agent.diff_parser import parse_diff, ParsedDiff, DiffLine
+from agent.diff_parser import parse_diff
 
 SAMPLE_PATCH = """\
 @@ -10,7 +10,9 @@ def process(items):
@@ -31,19 +30,24 @@ class TestDiffParser:
 
     def test_added_line_content(self):
         diff = parse_diff("foo.py", SAMPLE_PATCH)
-        added_contents = [l.content.strip() for l in diff.added_lines]
+        added_contents = [line.content.strip() for line in diff.added_lines]
         assert "if item is None:" in added_contents
         assert "continue" in added_contents
 
     def test_line_numbers_increment_for_added(self):
         diff = parse_diff("foo.py", SAMPLE_PATCH)
         added = diff.added_lines
-        line_nums = [l.line_number for l in added]
+        line_nums = [line.line_number for line in added]
         assert line_nums == sorted(line_nums)
 
     def test_removed_lines_do_not_advance_line_counter(self):
         diff = parse_diff("foo.py", SAMPLE_PATCH)
-        removed = [l for h in diff.hunks for l in h.lines if l.change_type == "removed"]
+        removed = [
+            line
+            for hunk in diff.hunks
+            for line in hunk.lines
+            if line.change_type == "removed"
+        ]
         assert len(removed) > 0
 
     def test_filename_stored(self):

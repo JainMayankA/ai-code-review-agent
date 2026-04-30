@@ -1,4 +1,5 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from agent.diff_parser import parse_diff
 from agent.reviewer import ReviewAgent, ReviewFinding
@@ -25,6 +26,41 @@ def test_missing_personal_rules_file_is_ignored():
 
     prompt = agent._build_system_prompt()
     assert "Follow these personal review rules" not in prompt
+
+
+def test_tool_call_arguments_are_parsed_into_findings():
+    agent = ReviewAgent(api_key="test-key", rules_file="")
+    tool_calls = [
+        SimpleNamespace(
+            function=SimpleNamespace(
+                name="report_bug",
+                arguments=(
+                    '{"filename": "demo.py", "line": 3, '
+                    '"description": "Bug found.", "suggestion": "Fix it."}'
+                ),
+            )
+        ),
+        SimpleNamespace(
+            function=SimpleNamespace(
+                name="post_summary",
+                arguments='{"summary": "One issue.", "verdict": "REQUEST_CHANGES"}',
+            )
+        ),
+    ]
+
+    parsed = agent._parse_tool_calls(tool_calls)
+
+    assert parsed["summary"] == "One issue."
+    assert parsed["verdict"] == "REQUEST_CHANGES"
+    assert parsed["findings"] == [
+        {
+            "tool": "report_bug",
+            "filename": "demo.py",
+            "line": 3,
+            "description": "Bug found.",
+            "suggestion": "Fix it.",
+        }
+    ]
 
 
 def test_findings_snap_to_added_diff_lines():

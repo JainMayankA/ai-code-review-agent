@@ -1,4 +1,3 @@
-import pytest
 from agent.rag_context import RepoIndex, CodeChunk
 from github.webhook import verify_signature, parse_pr_event
 import hashlib

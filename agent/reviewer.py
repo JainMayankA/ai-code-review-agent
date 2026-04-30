@@ -1,13 +1,13 @@
 """
 LLM review agent.
 
-Uses the OpenAI API with structured JSON output to produce
+Uses the OpenAI API with tool calls to produce
 typed findings (bug, security, performance, style) with exact line numbers.
 
 Architecture:
   1. Build context window: PR metadata + file diffs + full file content
-  2. Call OpenAI with a strict JSON response prompt
-  3. Parse JSON output into typed ReviewFinding objects
+  2. Call OpenAI with function tools for typed review findings
+  3. Parse tool calls into typed ReviewFinding objects
   4. Map findings back to diff line numbers for inline comments
 """
 
@@ -158,15 +158,20 @@ class ReviewAgent:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
+            tools=self._openai_tools(),
+            tool_choice="required",
             max_tokens=4096,
         )
-        result = response.choices[0].message.content or "{}"
+        message = response.choices[0].message
 
         findings: list[ReviewFinding] = []
         summary = "Review complete."
         verdict = "COMMENT"
 
-        parsed = self._parse_response(result)
+        parsed = self._parse_tool_calls(message.tool_calls or [])
+        if not parsed:
+            result = message.content or "{}"
+            parsed = self._parse_response(result)
         summary = parsed.get("summary", summary)
         verdict = parsed.get("verdict", verdict)
         for item in parsed.get("findings", []):
@@ -189,12 +194,26 @@ class ReviewAgent:
         return ReviewResult(findings=findings, summary=summary,
                             verdict=verdict, comments=comments)
 
+    def _openai_tools(self) -> list[dict]:
+        """Convert local tool schemas to the OpenAI function-tool format."""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool["description"],
+                    "parameters": tool["input_schema"],
+                },
+            }
+            for tool in REVIEW_TOOLS
+        ]
+
     def _build_system_prompt(self) -> str:
         prompt = (
-            "You are a senior code reviewer. Return only valid JSON with this shape: "
-            '{"summary": "...", "verdict": "APPROVE|REQUEST_CHANGES|COMMENT", '
-            '"findings": [{"tool": "report_bug|report_security|report_performance|report_style", '
-            '"filename": "...", "line": 1, "description": "...", "suggestion": "..."}]}. '
+            "You are a senior code reviewer. Use the provided review tools to report "
+            "findings. Call report_bug, report_security, report_performance, or "
+            "report_style once for each issue you find. Always call post_summary "
+            "exactly once after all findings. "
             "Use REQUEST_CHANGES for definite bugs or security issues, COMMENT for non-blocking issues, "
             "and APPROVE only when there are no findings."
         )
@@ -246,9 +265,43 @@ class ReviewAgent:
             "Review this PR thoroughly. Report bugs, security issues, "
             "performance problems, and style issues. Be specific: always include the exact "
             "filename and line number. Only flag real issues — do not report style issues "
-            "unless they significantly hurt readability. Return only the JSON object."
+            "unless they significantly hurt readability."
         )
         return "\n".join(parts)
+
+    def _parse_tool_calls(self, tool_calls: list) -> dict:
+        findings: list[dict] = []
+        summary = ""
+        verdict = ""
+
+        for tool_call in tool_calls:
+            function = getattr(tool_call, "function", None)
+            if function is None:
+                continue
+
+            name = getattr(function, "name", "")
+            raw_args = getattr(function, "arguments", "") or "{}"
+            try:
+                args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                logger.warning("Could not parse tool call arguments for %s", name)
+                continue
+
+            if name == "post_summary":
+                summary = args.get("summary", summary)
+                verdict = args.get("verdict", verdict)
+                continue
+
+            if name in SEVERITY_MAP:
+                findings.append({"tool": name, **args})
+
+        if not findings and not summary and not verdict:
+            return {}
+        return {
+            "summary": summary or "Review complete.",
+            "verdict": verdict or "COMMENT",
+            "findings": findings,
+        }
 
     def _parse_response(self, result: str) -> dict:
         try:
