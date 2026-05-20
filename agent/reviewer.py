@@ -143,7 +143,7 @@ class ReviewAgent:
         model: Optional[str] = None,
         rules_file: Optional[str] = None,
     ):
-        self.client = OpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"])
+        self.client = OpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"], max_retries=3)
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         self.rules_file = rules_file or os.getenv("REVIEW_RULES_FILE", "review_rules.md")
 

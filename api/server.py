@@ -6,6 +6,8 @@ Handles GitHub webhook events and exposes a manual review trigger endpoint.
 from __future__ import annotations
 import logging
 import os
+import threading
+from collections import deque
 from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
@@ -26,6 +28,29 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 REVIEW_REPO_CONTEXT = os.getenv("REVIEW_REPO_CONTEXT", "false").lower() == "true"
+
+# ---------------------------------------------------------------------------
+# Idempotency: prevent duplicate reviews when GitHub retries a webhook.
+# Key = "owner/repo#pr@sha" — unique per commit, so a force-push still
+# triggers a fresh review while a verbatim retry is suppressed.
+# Bounded to _MAX_SEEN to avoid unbounded memory growth.
+# ---------------------------------------------------------------------------
+_MAX_SEEN = 500
+_seen_lock = threading.Lock()
+_seen_keys: set[str] = set()
+_seen_order: deque[str] = deque()
+
+
+def _mark_seen(key: str) -> bool:
+    """Return True if this is the first time we've seen this key."""
+    with _seen_lock:
+        if key in _seen_keys:
+            return False
+        _seen_keys.add(key)
+        _seen_order.append(key)
+        if len(_seen_order) > _MAX_SEEN:
+            _seen_keys.discard(_seen_order.popleft())
+        return True
 
 
 def get_orchestrator() -> ReviewOrchestrator:
@@ -66,11 +91,19 @@ async def github_webhook(
     if not event:
         return {"status": "ignored", "reason": "not a PR open/sync event"}
 
+    key = f"{event.owner}/{event.repo}#{event.pr_number}@{event.head_sha}"
+    if not _mark_seen(key):
+        logger.info("Duplicate webhook ignored: %s", key)
+        return {"status": "duplicate", "pr": event.pr_number}
+
     logger.info(f"Webhook: PR #{event.pr_number} {event.action} in {event.owner}/{event.repo}")
 
     def run_review():
-        orchestrator = get_orchestrator()
-        orchestrator.process_pr(event.owner, event.repo, event.pr_number)
+        try:
+            orchestrator = get_orchestrator()
+            orchestrator.process_pr(event.owner, event.repo, event.pr_number)
+        except Exception:
+            logger.exception("Review failed for PR #%s in %s/%s", event.pr_number, event.owner, event.repo)
 
     background_tasks.add_task(run_review)
     return {"status": "accepted", "pr": event.pr_number, "action": event.action}
@@ -87,19 +120,22 @@ class ManualReviewRequest(BaseModel):
 def manual_review(req: ManualReviewRequest, background_tasks: BackgroundTasks):
     """Trigger a review manually — useful for testing without a live webhook."""
     def run():
-        github = GitHubClient(token=GITHUB_TOKEN)
-        agent = ReviewAgent(api_key=OPENAI_KEY)
-        config = OrchestratorConfig(
-            post_review=not req.dry_run,
-            include_repo_context=REVIEW_REPO_CONTEXT,
-        )
-        orch   = ReviewOrchestrator(github=github, agent=agent, config=config)
-        result = orch.process_pr(req.owner, req.repo, req.pr_number)
-        if result:
-            logger.info(
-                f"Manual review done: {len(result.findings)} findings, "
-                f"verdict={result.verdict}"
+        try:
+            github = GitHubClient(token=GITHUB_TOKEN)
+            agent = ReviewAgent(api_key=OPENAI_KEY)
+            config = OrchestratorConfig(
+                post_review=not req.dry_run,
+                include_repo_context=REVIEW_REPO_CONTEXT,
             )
+            orch = ReviewOrchestrator(github=github, agent=agent, config=config)
+            result = orch.process_pr(req.owner, req.repo, req.pr_number)
+            if result:
+                logger.info(
+                    "Manual review done: %d findings, verdict=%s",
+                    len(result.findings), result.verdict,
+                )
+        except Exception:
+            logger.exception("Manual review failed for %s/%s#%s", req.owner, req.repo, req.pr_number)
 
     background_tasks.add_task(run)
     return {"status": "accepted", "pr": req.pr_number}

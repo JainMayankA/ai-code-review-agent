@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -15,6 +16,9 @@ import httpx
 
 logger = logging.getLogger(__name__)
 GITHUB_API = "https://api.github.com"
+
+# Statuses worth retrying: rate-limited or transient server errors.
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
 
 
 @dataclass
@@ -57,11 +61,51 @@ class GitHubClient:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
+    def _request(self, method: str, url: str, timeout: int = 15, **kwargs) -> httpx.Response:
+        """Send an HTTP request with up to 3 attempts on transient failures."""
+        for attempt in range(3):
+            try:
+                with httpx.Client(headers=self.headers, timeout=timeout) as client:
+                    resp = client.request(method, url, **kwargs)
+            except httpx.TimeoutException:
+                if attempt == 2:
+                    raise
+                delay = 2 ** attempt
+                logger.warning("Request timeout (attempt %d), retrying in %ds: %s", attempt + 1, delay, url)
+                time.sleep(delay)
+                continue
+            if resp.status_code in _RETRY_STATUSES and attempt < 2:
+                delay = 2 ** attempt
+                logger.warning(
+                    "HTTP %s (attempt %d), retrying in %ds: %s",
+                    resp.status_code, attempt + 1, delay, url,
+                )
+                time.sleep(delay)
+                continue
+            return resp
+        return resp  # final attempt — caller decides whether to raise_for_status
+
     def _get(self, url: str) -> dict | list:
-        with httpx.Client(headers=self.headers, timeout=15) as client:
-            resp = client.get(url)
+        resp = self._request("GET", url)
+        resp.raise_for_status()
+        return resp.json()
+
+    def _get_paginated(self, url: str) -> list:
+        """Accumulate all pages of a GitHub list endpoint (max 100 per page)."""
+        results: list = []
+        page = 1
+        while True:
+            sep = "&" if "?" in url else "?"
+            resp = self._request("GET", f"{url}{sep}per_page=100&page={page}")
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
+            if not data:
+                break
+            results.extend(data)
+            if len(data) < 100:
+                break
+            page += 1
+        return results
 
     def get_pull_request(self, owner: str, repo: str, pr_number: int) -> PullRequest:
         resp = self._get(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}")
@@ -77,7 +121,7 @@ class GitHubClient:
         )
 
     def get_pr_files(self, owner: str, repo: str, pr_number: int) -> list[PRFile]:
-        data = self._get(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files")
+        data = self._get_paginated(f"{GITHUB_API}/repos/{owner}/{repo}/pulls/{pr_number}/files")
         return [
             PRFile(
                 filename=f["filename"],
@@ -92,7 +136,14 @@ class GitHubClient:
         ]
 
     def get_repository_files(self, owner: str, repo: str, ref: str) -> list[str]:
-        data = self._get(f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{ref}?recursive=1")
+        resp = self._request("GET", f"{GITHUB_API}/repos/{owner}/{repo}/git/trees/{ref}?recursive=1")
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("truncated"):
+            logger.warning(
+                "Repository tree truncated for %s/%s — some files may be missing from RAG context",
+                owner, repo,
+            )
         return [
             item["path"]
             for item in data.get("tree", [])
@@ -141,20 +192,19 @@ class GitHubClient:
                 for c in inline_comments
             ],
         }
-        with httpx.Client(headers=self.headers, timeout=30) as client:
-            resp = client.post(url, json=body)
-            if resp.status_code == 422:
-                logger.warning("GitHub rejected inline review: %s", resp.text)
-                fallback_body = self._format_fallback_review_body(
-                    summary=summary,
-                    comments=inline_comments,
-                    icons=icons,
-                )
-                return self.post_pr_comment(owner, repo, pr_number, fallback_body)
-            if resp.is_error:
-                logger.error("GitHub review API error: %s", resp.text)
-            resp.raise_for_status()
-            return resp.json()
+        resp = self._request("POST", url, timeout=30, json=body)
+        if resp.status_code == 422:
+            logger.warning("GitHub rejected inline review: %s", resp.text)
+            fallback_body = self._format_fallback_review_body(
+                summary=summary,
+                comments=inline_comments,
+                icons=icons,
+            )
+            return self.post_pr_comment(owner, repo, pr_number, fallback_body)
+        if resp.is_error:
+            logger.error("GitHub review API error: %s", resp.text)
+        resp.raise_for_status()
+        return resp.json()
 
     def post_pr_comment(
         self,
@@ -164,12 +214,11 @@ class GitHubClient:
         body: str,
     ) -> dict:
         url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_number}/comments"
-        with httpx.Client(headers=self.headers, timeout=30) as client:
-            resp = client.post(url, json={"body": body})
-            if resp.is_error:
-                logger.error("GitHub PR comment API error: %s", resp.text)
-            resp.raise_for_status()
-            return resp.json()
+        resp = self._request("POST", url, timeout=30, json={"body": body})
+        if resp.is_error:
+            logger.error("GitHub PR comment API error: %s", resp.text)
+        resp.raise_for_status()
+        return resp.json()
 
     def _format_fallback_review_body(
         self,
