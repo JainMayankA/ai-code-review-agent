@@ -15,7 +15,5 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install -r requirements.txt
-      - run: |
-          touch agent/__init__.py github/__init__.py api/__init__.py tests/__init__.py
-          pytest tests/ -v --tb=short
+      - run: pytest tests/ -v --tb=short
       - run: pip install ruff && ruff check agent/ github/ api/

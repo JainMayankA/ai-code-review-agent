@@ -1,10 +1,4 @@
-"""
-Unified diff parser.
-
-Converts raw GitHub patch strings into structured hunks with accurate
-line numbers. This is critical for posting inline review comments —
-GitHub's API requires the exact line number in the *new* file.
-"""
+"""Parses GitHub unified-diff patches into new-file line numbers for inline comments."""
 
 from __future__ import annotations
 import re
@@ -49,7 +43,7 @@ class ParsedDiff:
         if target_idx is None:
             return ""
         start = max(0, target_idx - window)
-        end   = min(len(all_lines), target_idx + window + 1)
+        end = min(len(all_lines), target_idx + window + 1)
         return "\n".join(
             f"{'>' if line.line_number == line_number else ' '} {line.line_number:4d} | {line.content}"
             for line in all_lines[start:end]
@@ -68,10 +62,10 @@ def parse_diff(filename: str, patch: str) -> ParsedDiff:
     for raw_line in patch.splitlines():
         header_match = HUNK_HEADER_RE.match(raw_line)
         if header_match:
-            old_start  = int(header_match.group(1))
-            old_count  = int(header_match.group(2) or 1)
-            new_start  = int(header_match.group(3))
-            new_count  = int(header_match.group(4) or 1)
+            old_start = int(header_match.group(1))
+            old_count = int(header_match.group(2) or 1)
+            new_start = int(header_match.group(3))
+            new_count = int(header_match.group(4) or 1)
             current_hunk = DiffHunk(
                 old_start=old_start,
                 old_count=old_count,

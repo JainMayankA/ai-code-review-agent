@@ -1,12 +1,4 @@
-"""
-Review orchestrator.
-
-Entry point for processing a PR:
-  1. Fetch PR metadata + diff files from GitHub
-  2. Build RAG index from changed files + related context
-  3. Run LLM review agent
-  4. Post results back as a GitHub PR review with inline comments
-"""
+"""End-to-end PR review: fetch from GitHub, optionally add context, review, post."""
 
 from __future__ import annotations
 import logging
@@ -42,13 +34,13 @@ SKIP_DIRECTORIES = {
 
 @dataclass
 class OrchestratorConfig:
-    max_files: int = 20           # skip PRs with > N files
+    max_files: int = 20  # skip PRs with more changed files than this
     max_file_size_bytes: int = 100_000
     fetch_full_content: bool = True
     include_repo_context: bool = False
     repo_context_file_limit: int = 200
     rag_context_chunks: int = 5
-    post_review: bool = True      # False = dry run, log only
+    post_review: bool = True  # False = dry run, log only
 
 
 class ReviewOrchestrator:
@@ -76,7 +68,7 @@ class ReviewOrchestrator:
         ][:self.config.max_files]
 
         if not files:
-            logger.info("No reviewable files found — skipping")
+            logger.info("No reviewable files found, skipping")
             return None
 
         logger.info(f"Reviewing {len(files)} files in PR '{pr.title}'")
@@ -119,7 +111,7 @@ class ReviewOrchestrator:
 
         elapsed = time.perf_counter() - start
         logger.info(
-            f"Review complete in {elapsed:.1f}s — "
+            f"Review complete in {elapsed:.1f}s: "
             f"{len(result.findings)} findings, verdict={result.verdict}"
         )
 

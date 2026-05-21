@@ -10,14 +10,11 @@ import json
 from unittest.mock import MagicMock
 
 from agent.diff_parser import parse_diff
-from agent.reviewer import ReviewAgent, ReviewFinding, SEVERITY_MAP
+from agent.reviewer import ReviewAgent, ReviewFinding, REVIEW_TOOLS, SEVERITY_MAP
 from github.client import PRFile, PullRequest
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
+# SAMPLE_PATCH adds lines at new-file line numbers 41 and 42.
 SAMPLE_PATCH = """\
 @@ -40,6 +40,8 @@ def check_token(token):
      stored = get_stored_token()
@@ -26,7 +23,6 @@ SAMPLE_PATCH = """\
 +        raise AuthError()
      return True
 """
-# Added lines from SAMPLE_PATCH are at new-file lines 41 and 42.
 
 
 def _tool_call(name: str, args: dict) -> MagicMock:
@@ -37,7 +33,6 @@ def _tool_call(name: str, args: dict) -> MagicMock:
 
 
 def _make_agent() -> ReviewAgent:
-    # api_key is stored but never used in unit tests that mock self.client
     return ReviewAgent(api_key="test-key", rules_file=None)
 
 
@@ -77,10 +72,6 @@ def _mock_openai_response(tool_calls: list) -> MagicMock:
     resp.choices[0].message.content = None
     return resp
 
-
-# ---------------------------------------------------------------------------
-# _parse_tool_calls
-# ---------------------------------------------------------------------------
 
 class TestParseToolCalls:
     def setup_method(self):
@@ -155,15 +146,10 @@ class TestParseToolCalls:
         assert result["findings"][0]["vulnerability_type"] == "SQL Injection"
 
 
-# ---------------------------------------------------------------------------
-# _findings_to_comments
-# ---------------------------------------------------------------------------
-
 class TestFindingsToComments:
     def setup_method(self):
         self.agent = _make_agent()
         self.diff = parse_diff("src/auth.py", SAMPLE_PATCH)
-        # Verify test expectations: SAMPLE_PATCH adds lines 41 and 42
         assert {dl.line_number for dl in self.diff.added_lines} == {41, 42}
 
     def test_line_in_diff_produces_inline_comment(self):
@@ -174,7 +160,6 @@ class TestFindingsToComments:
         assert comments[0].line == 41
 
     def test_line_not_in_diff_snaps_to_nearest_added_line(self):
-        # Line 200 is far from added lines 41, 42 — should snap to 42 (nearest)
         finding = _make_finding(filename="src/auth.py", line=200)
         comments = self.agent._findings_to_comments([finding], {"src/auth.py": self.diff})
 
@@ -185,10 +170,9 @@ class TestFindingsToComments:
         finding = _make_finding(filename="src/auth.py", line=1)
         comments = self.agent._findings_to_comments([finding], {"src/auth.py": self.diff})
 
-        assert comments[0].line == 41  # nearest to 1 from {41, 42}
+        assert comments[0].line == 41
 
     def test_file_with_no_added_lines_becomes_top_level_comment(self):
-        # Removal-only patch has no added lines
         removal_patch = "@@ -10,3 +10,0 @@\n-line1\n-line2\n-line3\n"
         diff = parse_diff("src/old.py", removal_patch)
         assert diff.added_lines == []
@@ -247,10 +231,6 @@ class TestFindingsToComments:
         assert len(comments) == 2
 
 
-# ---------------------------------------------------------------------------
-# _build_prompt
-# ---------------------------------------------------------------------------
-
 class TestBuildPrompt:
     def setup_method(self):
         self.agent = _make_agent()
@@ -282,7 +262,6 @@ class TestBuildPrompt:
         pr = _make_pr()
         long_content = "x" * 5000
         prompt = self.agent._build_prompt(pr, [_make_file()], {"src/auth.py": long_content})
-        # 5000 chars must not appear; 3000 chars worth of x's will appear
         assert "x" * 3001 not in prompt
         assert "x" * 3000 in prompt
 
@@ -291,10 +270,6 @@ class TestBuildPrompt:
         prompt = self.agent._build_prompt(pr, [_make_file()], {})
         assert "hmac.compare_digest" in prompt  # from pr.body
 
-
-# ---------------------------------------------------------------------------
-# review_pr — end-to-end with mocked OpenAI client
-# ---------------------------------------------------------------------------
 
 class TestReviewPr:
     def setup_method(self):
@@ -365,10 +340,9 @@ class TestReviewPr:
 
         call_kwargs = self.agent.client.chat.completions.create.call_args.kwargs
         assert call_kwargs["tool_choice"] == "required"
-        assert len(call_kwargs["tools"]) == len(self.agent._openai_tools())
+        assert len(call_kwargs["tools"]) == len(REVIEW_TOOLS)
 
     def test_finding_line_snapped_to_valid_diff_line(self):
-        # Model reports line 999 which isn't in the diff; should snap to nearest added line (41 or 42)
         self._set_response([
             _tool_call("report_bug", {"filename": "src/auth.py", "line": 999, "description": "Bug", "suggestion": "Fix"}),
             _tool_call("post_summary", {"summary": "Bug.", "verdict": "REQUEST_CHANGES"}),

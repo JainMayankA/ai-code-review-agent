@@ -1,14 +1,10 @@
-"""
-FastAPI server.
-Handles GitHub webhook events and exposes a manual review trigger endpoint.
-"""
+"""FastAPI app: GitHub webhook handler plus a manual review trigger."""
 
 from __future__ import annotations
 import logging
 import os
 import threading
 from collections import deque
-from typing import Optional
 
 from fastapi import BackgroundTasks, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
@@ -29,12 +25,8 @@ OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 REVIEW_REPO_CONTEXT = os.getenv("REVIEW_REPO_CONTEXT", "false").lower() == "true"
 
-# ---------------------------------------------------------------------------
-# Idempotency: prevent duplicate reviews when GitHub retries a webhook.
-# Key = "owner/repo#pr@sha" — unique per commit, so a force-push still
-# triggers a fresh review while a verbatim retry is suppressed.
-# Bounded to _MAX_SEEN to avoid unbounded memory growth.
-# ---------------------------------------------------------------------------
+# Dedupe webhook retries by commit (owner/repo#pr@sha). Bounded so it can't grow
+# forever; a force-push has a new sha and still triggers a fresh review.
 _MAX_SEEN = 500
 _seen_lock = threading.Lock()
 _seen_keys: set[str] = set()
@@ -72,12 +64,12 @@ def health():
 async def github_webhook(
     request: Request,
     background_tasks: BackgroundTasks,
-    x_hub_signature_256: Optional[str] = Header(None),
-    x_github_event: Optional[str] = Header(None),
+    x_hub_signature_256: str | None = Header(None),
+    x_github_event: str | None = Header(None),
 ):
     body = await request.body()
 
-    # Validate signature — reject anything not from GitHub
+    # Reject anything not signed with our webhook secret.
     if WEBHOOK_SECRET:
         if not verify_signature(body, x_hub_signature_256 or "", WEBHOOK_SECRET):
             raise HTTPException(status_code=401, detail="Invalid webhook signature")
@@ -118,7 +110,7 @@ class ManualReviewRequest(BaseModel):
 
 @app.post("/review")
 def manual_review(req: ManualReviewRequest, background_tasks: BackgroundTasks):
-    """Trigger a review manually — useful for testing without a live webhook."""
+    """Trigger a review manually, e.g. for testing without a live webhook."""
     def run():
         try:
             github = GitHubClient(token=GITHUB_TOKEN)

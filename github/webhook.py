@@ -1,7 +1,4 @@
-"""
-GitHub webhook handler.
-Validates HMAC-SHA256 signatures and extracts PR open/sync events.
-"""
+"""Verifies GitHub webhook signatures and extracts PR open/sync events."""
 
 from __future__ import annotations
 import hashlib
@@ -23,11 +20,7 @@ class PREvent:
 
 
 def verify_signature(payload: bytes, signature_header: str, secret: str) -> bool:
-    """
-    Validates the X-Hub-Signature-256 header.
-    GitHub signs every webhook with HMAC-SHA256 of the raw payload body.
-    Reject any request where this doesn't match — prevents spoofed events.
-    """
+    """Check the X-Hub-Signature-256 header (HMAC-SHA256 of the raw body)."""
     if not signature_header or not signature_header.startswith("sha256="):
         return False
     expected = "sha256=" + hmac.new(
@@ -37,10 +30,7 @@ def verify_signature(payload: bytes, signature_header: str, secret: str) -> bool
 
 
 def parse_pr_event(payload: dict) -> PREvent | None:
-    """
-    Returns a PREvent if this is a PR opened/synchronize/reopened action.
-    Returns None for all other event types (push, issues, etc.).
-    """
+    """Return a PREvent for opened/synchronize/reopened PRs, else None."""
     action = payload.get("action", "")
     if action not in ("opened", "synchronize", "reopened"):
         return None

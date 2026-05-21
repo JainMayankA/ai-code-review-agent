@@ -1,26 +1,10 @@
-"""
-RAG context builder.
-
-Builds a lightweight in-memory index of the repository's codebase
-so the review agent can retrieve relevant files beyond just the diff.
-
-Use cases:
-  - A changed function calls helpers defined elsewhere → fetch those helpers
-  - A new API endpoint should follow patterns from existing endpoints
-  - A schema change needs context from migration files
-
-Approach:
-  - Chunk files into ~50-line segments
-  - TF-IDF similarity (no embedding API needed) to find relevant chunks
-  - Returns top-k chunks as additional context for the LLM prompt
-"""
+"""Lightweight TF-IDF index for pulling repo code chunks related to a diff."""
 
 from __future__ import annotations
 import math
 import re
 from collections import Counter
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -36,12 +20,9 @@ class CodeChunk:
 
 
 class RepoIndex:
-    """
-    TF-IDF index over repository code chunks.
-    No external dependencies — pure Python.
-    """
+    """TF-IDF index over repository code chunks."""
 
-    CHUNK_SIZE = 50     # lines per chunk
+    CHUNK_SIZE = 50  # lines per chunk
     MIN_TOKEN_LEN = 3
 
     def __init__(self):
@@ -75,7 +56,7 @@ class RepoIndex:
         self._built = True
 
     def query(self, text: str, top_k: int = 5,
-              exclude_files: Optional[set] = None) -> list[CodeChunk]:
+              exclude_files: set | None = None) -> list[CodeChunk]:
         """Return top-k most relevant chunks for the query text."""
         if not self._built:
             self.build()

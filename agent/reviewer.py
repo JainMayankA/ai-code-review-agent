@@ -1,15 +1,4 @@
-"""
-LLM review agent.
-
-Uses the OpenAI API with tool calls to produce
-typed findings (bug, security, performance, style) with exact line numbers.
-
-Architecture:
-  1. Build context window: PR metadata + file diffs + full file content
-  2. Call OpenAI with function tools for typed review findings
-  3. Parse tool calls into typed ReviewFinding objects
-  4. Map findings back to diff line numbers for inline comments
-"""
+"""OpenAI review agent: turns a PR diff into typed findings via tool calls."""
 
 from __future__ import annotations
 import logging
@@ -17,7 +6,6 @@ import os
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 from openai import OpenAI
 
@@ -26,91 +14,107 @@ from github.client import PRFile, PullRequest, ReviewComment
 
 logger = logging.getLogger(__name__)
 
+# OpenAI function tools. The model calls one per finding, then post_summary once.
 REVIEW_TOOLS = [
     {
-        "name": "report_bug",
-        "description": "Report a definite bug: logic error, null dereference, off-by-one, incorrect condition, unhandled exception path.",
-        "input_schema": {
-            "type": "object",
-            "required": ["filename", "line", "description", "suggestion"],
-            "properties": {
-                "filename":    {"type": "string"},
-                "line":        {"type": "integer", "description": "Line number in the new file"},
-                "description": {"type": "string", "description": "What the bug is and why it's wrong"},
-                "suggestion":  {"type": "string", "description": "Concrete fix"},
-            },
-        },
-    },
-    {
-        "name": "report_security",
-        "description": "Report a security vulnerability: SQL injection, XSS, hardcoded secret, insecure deserialization, SSRF, path traversal, weak crypto.",
-        "input_schema": {
-            "type": "object",
-            "required": ["filename", "line", "vulnerability_type", "description", "suggestion"],
-            "properties": {
-                "filename":          {"type": "string"},
-                "line":              {"type": "integer"},
-                "vulnerability_type": {"type": "string"},
-                "description":       {"type": "string"},
-                "suggestion":        {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "report_performance",
-        "description": "Report a performance issue: N+1 query, unnecessary loop, missing index hint, blocking I/O in hot path, excessive memory allocation.",
-        "input_schema": {
-            "type": "object",
-            "required": ["filename", "line", "description", "suggestion"],
-            "properties": {
-                "filename":    {"type": "string"},
-                "line":        {"type": "integer"},
-                "description": {"type": "string"},
-                "suggestion":  {"type": "string"},
-                "impact":      {"type": "string", "description": "Estimated performance impact"},
-            },
-        },
-    },
-    {
-        "name": "report_style",
-        "description": "Report a minor style / maintainability issue. Only use this sparingly for things that genuinely hurt readability.",
-        "input_schema": {
-            "type": "object",
-            "required": ["filename", "line", "description"],
-            "properties": {
-                "filename":    {"type": "string"},
-                "line":        {"type": "integer"},
-                "description": {"type": "string"},
-                "suggestion":  {"type": "string"},
-            },
-        },
-    },
-    {
-        "name": "post_summary",
-        "description": "Post the overall review summary. Always call this exactly once after all findings.",
-        "input_schema": {
-            "type": "object",
-            "required": ["summary", "verdict"],
-            "properties": {
-                "summary": {"type": "string", "description": "Markdown summary of the full review"},
-                "verdict": {
-                    "type": "string",
-                    "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
-                    "description": "APPROVE if no bugs/security issues; REQUEST_CHANGES if bugs or security found; COMMENT otherwise",
+        "type": "function",
+        "function": {
+            "name": "report_bug",
+            "description": "Report a definite bug: logic error, null dereference, off-by-one, incorrect condition, unhandled exception path.",
+            "parameters": {
+                "type": "object",
+                "required": ["filename", "line", "description", "suggestion"],
+                "properties": {
+                    "filename": {"type": "string"},
+                    "line": {"type": "integer", "description": "Line number in the new file"},
+                    "description": {"type": "string", "description": "What the bug is and why it's wrong"},
+                    "suggestion": {"type": "string", "description": "Concrete fix"},
                 },
-                "bugs_found":     {"type": "integer"},
-                "security_found": {"type": "integer"},
-                "perf_found":     {"type": "integer"},
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_security",
+            "description": "Report a security vulnerability: SQL injection, XSS, hardcoded secret, insecure deserialization, SSRF, path traversal, weak crypto.",
+            "parameters": {
+                "type": "object",
+                "required": ["filename", "line", "vulnerability_type", "description", "suggestion"],
+                "properties": {
+                    "filename": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "vulnerability_type": {"type": "string"},
+                    "description": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_performance",
+            "description": "Report a performance issue: N+1 query, unnecessary loop, missing index hint, blocking I/O in hot path, excessive memory allocation.",
+            "parameters": {
+                "type": "object",
+                "required": ["filename", "line", "description", "suggestion"],
+                "properties": {
+                    "filename": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                    "impact": {"type": "string", "description": "Estimated performance impact"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report_style",
+            "description": "Report a minor style / maintainability issue. Only use this sparingly for things that genuinely hurt readability.",
+            "parameters": {
+                "type": "object",
+                "required": ["filename", "line", "description"],
+                "properties": {
+                    "filename": {"type": "string"},
+                    "line": {"type": "integer"},
+                    "description": {"type": "string"},
+                    "suggestion": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "post_summary",
+            "description": "Post the overall review summary. Always call this exactly once after all findings.",
+            "parameters": {
+                "type": "object",
+                "required": ["summary", "verdict"],
+                "properties": {
+                    "summary": {"type": "string", "description": "Markdown summary of the full review"},
+                    "verdict": {
+                        "type": "string",
+                        "enum": ["APPROVE", "REQUEST_CHANGES", "COMMENT"],
+                        "description": "APPROVE if no bugs/security issues; REQUEST_CHANGES if bugs or security found; COMMENT otherwise",
+                    },
+                    "bugs_found": {"type": "integer"},
+                    "security_found": {"type": "integer"},
+                    "perf_found": {"type": "integer"},
+                },
             },
         },
     },
 ]
 
 SEVERITY_MAP = {
-    "report_bug":         "error",
-    "report_security":    "error",
+    "report_bug": "error",
+    "report_security": "error",
     "report_performance": "warning",
-    "report_style":       "comment",
+    "report_style": "comment",
 }
 
 
@@ -139,11 +143,14 @@ class ReviewResult:
 class ReviewAgent:
     def __init__(
         self,
-        api_key: Optional[str] = None,
-        model: Optional[str] = None,
-        rules_file: Optional[str] = None,
+        api_key: str | None = None,
+        model: str | None = None,
+        rules_file: str | None = None,
     ):
-        self.client = OpenAI(api_key=api_key or os.environ["OPENAI_API_KEY"], max_retries=3)
+        api_key = api_key or os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        self.client = OpenAI(api_key=api_key, max_retries=3)
         self.model = model or os.getenv("OPENAI_MODEL", "gpt-4o")
         self.rules_file = rules_file or os.getenv("REVIEW_RULES_FILE", "review_rules.md")
 
@@ -158,7 +165,7 @@ class ReviewAgent:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            tools=self._openai_tools(),
+            tools=REVIEW_TOOLS,
             tool_choice="required",
             max_tokens=4096,
         )
@@ -193,20 +200,6 @@ class ReviewAgent:
         comments = self._findings_to_comments(findings, parsed_diffs)
         return ReviewResult(findings=findings, summary=summary,
                             verdict=verdict, comments=comments)
-
-    def _openai_tools(self) -> list[dict]:
-        """Convert local tool schemas to the OpenAI function-tool format."""
-        return [
-            {
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool["description"],
-                    "parameters": tool["input_schema"],
-                },
-            }
-            for tool in REVIEW_TOOLS
-        ]
 
     def _build_system_prompt(self) -> str:
         prompt = (
@@ -264,7 +257,7 @@ class ReviewAgent:
             "\n---\n"
             "Review this PR thoroughly. Report bugs, security issues, "
             "performance problems, and style issues. Be specific: always include the exact "
-            "filename and line number. Only flag real issues — do not report style issues "
+            "filename and line number. Only flag real issues; do not report style issues "
             "unless they significantly hurt readability."
         )
         return "\n".join(parts)
@@ -350,7 +343,9 @@ class ReviewAgent:
                     if original_line in valid_lines
                     else min(valid_lines, key=lambda valid_line: abs(valid_line - original_line))
                 )
-            elif parsed_diffs:
+            else:
+                # No diff to map against (missing/empty), so post as a top-level
+                # comment rather than guessing an inline line GitHub would reject.
                 body_parts.insert(0, f"`{f.filename}:{original_line}`")
                 comments.append(ReviewComment(
                     path=None,

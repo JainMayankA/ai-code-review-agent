@@ -10,7 +10,6 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import httpx
 
@@ -46,14 +45,14 @@ class PullRequest:
 
 @dataclass
 class ReviewComment:
-    path: Optional[str]
-    line: Optional[int]
+    path: str | None
+    line: int | None
     body: str
     severity: str = "comment"  # comment | warning | error
 
 
 class GitHubClient:
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: str | None = None):
         self.token = token or os.getenv("GITHUB_TOKEN", "")
         self.headers = {
             "Authorization": f"Bearer {self.token}",
@@ -83,7 +82,7 @@ class GitHubClient:
                 time.sleep(delay)
                 continue
             return resp
-        return resp  # final attempt — caller decides whether to raise_for_status
+        return resp  # final attempt; caller decides whether to raise_for_status
 
     def _get(self, url: str) -> dict | list:
         resp = self._request("GET", url)
@@ -141,7 +140,7 @@ class GitHubClient:
         data = resp.json()
         if data.get("truncated"):
             logger.warning(
-                "Repository tree truncated for %s/%s — some files may be missing from RAG context",
+                "Repository tree truncated for %s/%s; some files may be missing from RAG context",
                 owner, repo,
             )
         return [
